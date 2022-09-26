@@ -20,8 +20,14 @@
 //! calls.
 
 #![no_std]
+#![allow(clippy::missing_safety_doc)]
 
-use x86_64::instructions::port::Port;
+use bit_field::BitField;
+#[cfg(target_arch = "x86_64")]
+use x86_64::instructions::port::{Port};
+
+#[cfg(target_arch = "x86")]
+use x86::instructions::port::{Port};
 
 /// Command sent to begin PIC initialization.
 const CMD_INIT: u8 = 0x11;
@@ -31,6 +37,10 @@ const CMD_END_OF_INTERRUPT: u8 = 0x20;
 
 // The mode in which we want to run our PICs.
 const MODE_8086: u8 = 0x01;
+
+// In-Service Register
+const CMD_READ_ISR: u8 = 0x0b;
+
 
 /// An individual PIC chip.  This is not exported, because we always access
 /// it through `Pics` below.
@@ -43,6 +53,9 @@ struct Pic {
 
     /// The processor I/O port on which we send and receive data.
     data: Port<u8>,
+
+    /// Original mask of PIC
+    orig_mask: Option<u8>,
 }
 
 impl Pic {
@@ -84,11 +97,13 @@ impl ChainedPics {
                     offset: offset1,
                     command: Port::new(0x20),
                     data: Port::new(0x21),
+                    orig_mask: None,
                 },
                 Pic {
                     offset: offset2,
                     command: Port::new(0xA0),
                     data: Port::new(0xA1),
+                    orig_mask: None,
                 },
             ],
         }
@@ -161,6 +176,59 @@ impl ChainedPics {
     /// Do we handle this interrupt?
     pub fn handles_interrupt(&self, interrupt_id: u8) -> bool {
         self.pics.iter().any(|p| p.handles_interrupt(interrupt_id))
+    }
+
+
+    pub unsafe fn mask_all(&mut self) {
+        let pic0 = &mut self.pics[0];
+        pic0.orig_mask = Some(pic0.data.read());
+        pic0.data.write(0xff);
+
+        let pic1 = &mut self.pics[1];
+        pic1.orig_mask = Some(pic1.data.read());
+        pic1.data.write(0xff);
+    }
+
+    // 0 means interrupt enabled, 1 means masked
+    pub unsafe fn mask(&mut self, pic1_mask:u8, pic2_mask:u8){
+        let pic0 = &mut self.pics[0];
+        pic0.data.write(pic1_mask);
+
+        let pic1 = &mut self.pics[1];
+        pic1.data.write(pic2_mask);
+    }
+
+    /* PIC2 is chained, and
+     * represents IRQs 8-15.  PIC1 is IRQs 0-7, with 2 being the chain */
+    // Execute closure f if this is a spurious interrupt afterwards
+    // send end of interrupt (eio) if irq > 7
+    pub unsafe fn is_spurious_interrupt<F: FnOnce()>(&mut self, f: F) -> bool {
+        let pic1 = &mut self.pics[0];
+        pic1.command.write(CMD_READ_ISR);
+        let irq = pic1.command.read();
+        // If IRQ2 is set then check slave controller
+        // TODO: Check if correct bit position gets queried
+        if irq.get_bit(2) {
+            let pic2 = &mut self.pics[0];
+            pic2.command.write(CMD_READ_ISR);
+            let irq = pic2.command.read();
+
+            if irq == 0 {
+                f();
+                // Send eio to pic1 because it does not know
+                // that this is only a spurious interrupt
+                self.pics[0].end_of_interrupt();
+                return true;
+            }
+        } else {
+            // if IRQ2 (bit 2) is not set then irq should equal to 0 if
+            // it is a spurious interrupt.
+            if irq == 0 {
+                f();
+                return true;
+            }
+        }
+        false
     }
 
     /// Figure out which (if any) PICs in our chain need to know about this
