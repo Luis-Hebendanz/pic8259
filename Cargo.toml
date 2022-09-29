@@ -14,12 +14,13 @@ license = "Apache-2.0/MIT"
 default = ["nightly"]
 nightly = ["x86_64/inline_asm"]
 stable = ["x86_64/external_asm"]
+binary = []
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
-x86_64 = { git= "https://github.com/Luis-Hebendanz/x86_64.git", branch = "new_registers" }
+x86_64 = { path= "../x86_64" }
 
 [target.'cfg(target_arch = "x86")'.dependencies]
-x86 = { git= "https://github.com/Luis-Hebendanz/x86.git" }
+x86 = { path= "../x86" }
 
 [dependencies]
 bit_field = "0.10.1"
